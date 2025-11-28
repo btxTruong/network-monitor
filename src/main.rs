@@ -25,6 +25,12 @@ use tokio::sync::mpsc;
 use notify_rust::Notification;
 use tracing::{error, info, warn};
 
+/// Internal events for update check results
+enum UpdateResult {
+    Available(String),
+    UpToDate,
+}
+
 const REFRESH_INTERVAL: Duration = Duration::from_secs(1 * 60); // 1 minutes
 
 #[tokio::main]
@@ -148,9 +154,48 @@ async fn main() {
 
     // Main event loop
     let mut current_autostart = autostart_enabled;
+    // Channel for receiving update check results
+    let (update_tx, mut update_rx) = mpsc::channel::<UpdateResult>(4);
 
     loop {
         tokio::select! {
+            // Handle update check results from background task
+            Some(result) = update_rx.recv() => {
+                match result {
+                    UpdateResult::Available(new_version) => {
+                        info!("Update available: {}", new_version);
+                        updater::save_available_update(&new_version);
+                        let msg = format!("Update {} available! Click tray menu to install.", new_version);
+                        tokio::task::spawn_blocking(move || {
+                            let _ = Notification::new()
+                                .summary("Network Monitor")
+                                .body(&msg)
+                                .icon("network-monitor")
+                                .timeout(5000)
+                                .show();
+                        });
+                        tray_handle.update(move |tray: &mut NetworkTray| {
+                            tray.checking_update = false;
+                            tray.update_available = Some(new_version.clone());
+                        }).await;
+                    }
+                    UpdateResult::UpToDate => {
+                        info!("Already on latest version");
+                        tokio::task::spawn_blocking(|| {
+                            let _ = Notification::new()
+                                .summary("Network Monitor")
+                                .body("You're running the latest version!")
+                                .icon("network-monitor")
+                                .timeout(3000)
+                                .show();
+                        });
+                        tray_handle.update(|tray: &mut NetworkTray| {
+                            tray.checking_update = false;
+                        }).await;
+                    }
+                }
+            }
+
             // Handle tray menu commands
             Some(cmd) = cmd_rx.recv() => {
                 match cmd {
@@ -193,45 +238,29 @@ async fn main() {
                     }
                     TrayCommand::CheckUpdate => {
                         info!("Check for updates requested");
-                        // Show spinner and notification
+                        // Show spinner
                         tray_handle.update(|tray: &mut NetworkTray| {
                             tray.checking_update = true;
                         }).await;
-                        let _ = Notification::new()
-                            .summary("Network Monitor")
-                            .body("Checking for updates...")
-                            .icon("network-monitor")
-                            .timeout(2000)
-                            .show();
-
-                        let result = updater::check_for_update_forced().await;
-
-                        // Hide spinner and update result
-                        if let Some(new_version) = result {
-                            info!("Update available: {}", new_version);
-                            updater::save_available_update(&new_version);
+                        // notify-rust uses block_on internally, wrap in spawn_blocking
+                        tokio::task::spawn_blocking(|| {
                             let _ = Notification::new()
                                 .summary("Network Monitor")
-                                .body(&format!("Update {} available! Click tray menu to install.", new_version))
+                                .body("Checking for updates...")
                                 .icon("network-monitor")
-                                .timeout(5000)
+                                .timeout(2000)
                                 .show();
-                            tray_handle.update(move |tray: &mut NetworkTray| {
-                                tray.checking_update = false;
-                                tray.update_available = Some(new_version.clone());
+                        });
+
+                        // Spawn update check in background, send result via channel
+                        let tx = update_tx.clone();
+                        tokio::spawn(async move {
+                            let result = updater::check_for_update_forced().await;
+                            let _ = tx.send(match result {
+                                Some(version) => UpdateResult::Available(version),
+                                None => UpdateResult::UpToDate,
                             }).await;
-                        } else {
-                            info!("Already on latest version");
-                            let _ = Notification::new()
-                                .summary("Network Monitor")
-                                .body("You're running the latest version!")
-                                .icon("network-monitor")
-                                .timeout(3000)
-                                .show();
-                            tray_handle.update(|tray: &mut NetworkTray| {
-                                tray.checking_update = false;
-                            }).await;
-                        }
+                        });
                     }
                     TrayCommand::RunUpdate => {
                         info!("Running update...");

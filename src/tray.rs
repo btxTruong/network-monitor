@@ -3,7 +3,7 @@
 
 use crate::geo::GeoInfo;
 use crate::icons::{get_flag, ICON_SIZE};
-use ksni::{menu::StandardItem, Icon, MenuItem, Tray};
+use ksni::{menu::{CheckmarkItem, StandardItem}, Icon, MenuItem, Tray};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
@@ -190,13 +190,9 @@ impl Tray for NetworkTray {
         }));
 
         let autostart_tx = self.command_tx.clone();
-        let autostart_label = if self.autostart_enabled {
-            "Disable Autostart"
-        } else {
-            "Enable Autostart"
-        };
-        items.push(MenuItem::Standard(StandardItem {
-            label: autostart_label.to_string(),
+        items.push(MenuItem::Checkmark(CheckmarkItem {
+            label: "Launch on Login".to_string(),
+            checked: self.autostart_enabled,
             activate: Box::new(move |_| {
                 let _ = autostart_tx.try_send(TrayCommand::ToggleAutostart);
             }),

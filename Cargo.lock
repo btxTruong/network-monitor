@@ -1235,7 +1235,6 @@ dependencies = [
  "reqwest",
  "resvg",
  "serde",
- "serde_json",
  "thiserror",
  "tokio",
  "tracing",

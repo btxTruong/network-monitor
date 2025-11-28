@@ -1,10 +1,10 @@
 //! Network change detection module using D-Bus NetworkManager
-//! Monitors connectivity state changes to trigger location refresh.
+//! Monitors connectivity state and VPN changes to trigger location refresh.
 
 use futures_util::StreamExt;
 use thiserror::Error;
 use tokio::sync::mpsc;
-use zbus::{proxy, Connection};
+use zbus::{proxy, Connection, zvariant::OwnedObjectPath};
 
 /// NetworkManager connectivity states
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,10 +71,14 @@ trait NetworkManager {
     /// Get current connectivity state
     #[zbus(property)]
     fn state(&self) -> zbus::Result<u32>;
+
+    /// Get active connections (changes when VPN connects/disconnects)
+    #[zbus(property)]
+    fn active_connections(&self) -> zbus::Result<Vec<OwnedObjectPath>>;
 }
 
 /// Watches for network connectivity changes via NetworkManager D-Bus interface.
-/// Uses property change notifications to detect state changes.
+/// Monitors both connectivity state and active connections (for VPN changes).
 pub async fn watch_network_changes(tx: mpsc::Sender<NetworkEvent>) -> Result<(), NetworkError> {
     let connection = Connection::system().await?;
     let proxy = NetworkManagerProxy::new(&connection).await?;
@@ -82,35 +86,51 @@ pub async fn watch_network_changes(tx: mpsc::Sender<NetworkEvent>) -> Result<(),
     // Get initial state
     let initial_state = NetworkState::from(proxy.state().await.unwrap_or(0));
     let mut was_connected = initial_state.is_connected();
+    let mut last_connections = proxy.active_connections().await.unwrap_or_default().len();
 
     tracing::info!("Initial network state: {:?} (connected={})", initial_state, was_connected);
 
-    // Watch for property changes on the State property
-    let mut stream = proxy.receive_state_changed().await;
+    // Watch for state changes
+    let mut state_stream = proxy.receive_state_changed().await;
+    // Watch for active connection changes (VPN connect/disconnect)
+    let mut conn_stream = proxy.receive_active_connections_changed().await;
 
-    while let Some(change) = stream.next().await {
-        if let Ok(new_val) = change.get().await {
-            let new_state = NetworkState::from(new_val);
-            let is_connected = new_state.is_connected();
+    loop {
+        tokio::select! {
+            Some(change) = state_stream.next() => {
+                if let Ok(new_val) = change.get().await {
+                    let new_state = NetworkState::from(new_val);
+                    let is_connected = new_state.is_connected();
 
-            tracing::debug!("Network state changed: {:?} (connected={})", new_state, is_connected);
+                    tracing::debug!("Network state changed: {:?} (connected={})", new_state, is_connected);
 
-            // Only emit event if connectivity actually changed
-            if is_connected != was_connected {
-                let event = if is_connected {
-                    NetworkEvent::Connected
-                } else {
-                    NetworkEvent::Disconnected
-                };
-
-                if tx.send(event).await.is_err() {
-                    return Err(NetworkError::ChannelClosed);
+                    if is_connected != was_connected {
+                        let event = if is_connected {
+                            NetworkEvent::Connected
+                        } else {
+                            NetworkEvent::Disconnected
+                        };
+                        if tx.send(event).await.is_err() {
+                            return Err(NetworkError::ChannelClosed);
+                        }
+                        was_connected = is_connected;
+                    }
                 }
-
-                was_connected = is_connected;
+            }
+            Some(change) = conn_stream.next() => {
+                // Active connections changed (VPN connect/disconnect)
+                if let Ok(connections) = change.get().await {
+                    let new_count = connections.len();
+                    if new_count != last_connections && was_connected {
+                        tracing::info!("Active connections changed: {} -> {} (VPN change detected)", last_connections, new_count);
+                        // Emit Connected event to trigger refresh
+                        if tx.send(NetworkEvent::Connected).await.is_err() {
+                            return Err(NetworkError::ChannelClosed);
+                        }
+                    }
+                    last_connections = new_count;
+                }
             }
         }
     }
-
-    Ok(())
 }
