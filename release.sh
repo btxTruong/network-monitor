@@ -1,6 +1,7 @@
 #!/bin/bash
-# Release script - updates Cargo.toml version, commits, tags, and pushes
+# Release script - updates Cargo.toml version, commits, and creates tag
 # Usage: ./release.sh v0.1.0
+# After running, push manually via IDE or: git push origin main && git push origin <tag>
 
 set -e
 
@@ -36,13 +37,13 @@ git add Cargo.toml Cargo.lock
 git commit -m "chore: bump version to $VERSION"
 echo "✓ Committed version bump"
 
-# Create and push tag
+# Create tag
 git tag -a "$VERSION" -m "Release $VERSION"
-git push origin main
-git push origin "$VERSION"
+echo "✓ Created tag $VERSION"
 
 echo ""
-echo "✓ Tag $VERSION created and pushed"
-echo "✓ GitHub Actions will build and create the release"
+echo "Now push manually:"
+echo "  1. Push main branch (via IDE or: git push origin main)"
+echo "  2. Push tag: git push origin $VERSION"
 echo ""
-echo "Check: https://github.com/btxTruong/network-monitor/actions"
+echo "After push, check: https://github.com/btxTruong/network-monitor/actions"
