@@ -1,0 +1,9 @@
+/target/
+*.log
+.idea/
+*.swp
+*.swo
+.venv/
+
+# Downloaded during build
+assets/flags/
